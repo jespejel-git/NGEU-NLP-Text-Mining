@@ -1,0 +1,802 @@
+---
+title: "Text mining: Plan de recuperación Covid-19 UE"
+author: "Jose Antonio Espejel Muñoz"
+date: "19/07/2020"
+output:
+  html_document:
+    theme:       cosmo  # "default", "cerulean", "journal", "flatly", "readable", "spacelab", "united", "cosmo", "lumen", "paper", "sandstone", "simplex", "yeti"
+    highlight:   tango  # "default", "tango", "pygments", "kate", "monochrome", "espresso", "zenburn", "haddock", "textmate"
+    number_sections: false
+    code_folding: show
+    includes:
+      after_body: Joeysfooter.html
+    toc_depth: 4
+    toc: true
+    toc_float:
+      collapsed: true
+      smooth_scroll: false
+    epuRate::epurate:
+      number_sections: FALSE
+      code_folding:    "show"
+      toc:          TRUE 
+      word_document:  default
+    rmdformats::readthedown:
+      toc:          TRUE 
+      toc_float:    TRUE   
+    urlcolor: blue
+---
+<center>
+
+![](./figs/TextMiningEUCovid RPv2.jpg)
+
+</center>
+
+
+# Fondo europeo Covid-19
+El objetivo es analizar las medidas tomadas bajo el instrumento  de recuperación denominado NGEU (Next Generation EU) para combatir las consecuencias adversas provocadas por la pandemia del Covid-19 y su integración en el Marco Financiero Plurianual de la Unión Europea.
+
+Para ello se analizarán, por una parte, el plan que la Comisión estableció el 28 de mayo de 2020, basado en la solidaridad inspirada por los principios y valores comunes de la Unión Europea y por otra parte el acuerdo alcanzado la madrugada del 21 de Julio de 2020.
+
+Se examinarán las primeras respuestas en las redes sociales, a través de los servicios de microblogging de Twitter. Resaltar que estas opiniones presentan un sesgo hacia los usuarios de las redes sociales más jóvenes, entre 18 y 24 años. En este grupo de edad el 45% usa Twitter comparado con el 33% entre 25 y 29 años, el 27% entre 30 y 49 años y el 19% entre 50 y 64 años. Los usuarios universitarios son más propensos a usar Twitter, así como, los que tienen mayor poder adquisitivo y viven en la ciudad.
+
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, out.width = '\\textwidth', self.contained=TRUE)
+#Por problemas de renderizado en las figuras se añade out.width = '\\textwidth' Pandoc???
+```
+
+
+  
+***
+
+# Análisis de los documentos 
+Con el análisis automático de los documentos pretendemos obtener conocimiento acerca del asunto o pensamiento del documento sin leerlo. Para ello utilizaremos la capacidad para gestionar documentos provisto en el paquete tm^[tm: Feinerer http://tm.r-forge.r-project.org/] (*t*ext *m*ining) desarrollado por Ingo Feinerer. En la modelación del tema o tópico se utilizará la librería *stm*^[stm: MIT http://structuraltopicmodel.com/ by Margaret Roberts & others] de modelado de tema estructural desarrollada en el MIT.
+
+***
+## Preparación del entorno
+Se comprueban dependencias y se cargan librerías en memoria.
+
+
+```{r Librerias, results=FALSE, collapse=TRUE}
+
+# instalamos httpuv si no se ha instalado previamente para la autenticacion en Tweeter
+if (!requireNamespace("httpuv", quietly = TRUE)) {
+  install.packages("httpuv")
+}
+if (!requireNamespace("reshape2", quietly = TRUE)) {
+  install.packages("reshape2")
+}
+# Cargamos en el entorno las librerias necesarias suprimiendo los mensajes de diagnostico en la carga
+suppressPackageStartupMessages({
+  library(rtweet)       #conexion con la API de Twitter
+  library(stm)          #modelado del topico
+  library(tm)           #funciones de text mining, lectura pdf
+  library(sentimentr)   #sentiment analisis de tweets
+  library(wordcloud)    #representacion visual palabras mas frecuentes
+  library(RColorBrewer) #paleta de colores
+  library(plyr)         #funciones avanzadas pipelines
+  library(ggplot2)      #graficos - bar
+  library(knitr)        #markdown
+  library(data.table)   #datatable
+  library(reshape2)     #funcion acast tweets
+  library(tidyverse)    #inner-join
+  library(httpuv)       #Autenticar via web
+})
+
+#limpiamos las variables de entorno
+rm(list = ls())
+```
+  
+***
+## ETL **PROPUESTA** {#etl_propuesta}
+### **E**TL - Extract
+En primer lugar, cargamos en memoria la propuesta del Consejo de la Unión Europea para apoyar la recuperación tras la pandemia del Covid-19.^[Recovery Instrument to support the recovery in the
+aftermath of the COVID-19: https://data.consilium.europa.eu/doc/document/ST-8141-2020-REV-1/en/pdf] Para ello se lee directamente el pdf original, almacenado en el directorio data, con la función *readPDF* de la librería *tm*. A continuación, examinamos los metadatos del documento.
+
+
+```{r 'leer plan previo'}
+my_uri <- "./data/CELEX_52020PC0441R(01)_Covid19_EN_TXT.pdf"
+# Leemos
+pdf_doc <- readPDF(control=list(text='-enc "UTF-8"'))(elem = list(uri = my_uri), language="en")
+```
+
+```{r 'metadatos'}
+pdf_doc$meta
+```
+Observamos que se trata de un documento en inglés, del 28 de mayo de 2020, sin descripción ni encabezado ni autor. La plantilla usada es Copyright (c) de la Comisión Europea 2002-2018 y el documento tiene id del departamento legal de la Comisión Europea.
+
+  
+***
+
+```{r 'raw content', echo=c(1,3)}
+cat("Número de páginas: ", length(pdf_doc$content))
+cat("Visualizamos las dos primeras para hacernos una idea de las transformaciones que deberemos realizar")
+head(pdf_doc$content, 2)
+```
+
+
+***
+
+Extraemos el texto propiamente dicho del documento como un conjunto de líneas mediante la función *content()*. Como se ha podido apreciar, en las líneas aparecen caracteres especiales, muchas en blanco y otros elementos que será necesario filtrar como parte del procesamiento.
+
+```{r}
+pdf_texto <- content(pdf_doc)
+```
+  
+***
+### E**T**L - Transform
+Para automatizar transformación de los datos, creamos dos funciones, *clean.txt* y *corpus.clean*. 
+
+En la primera, nos basaremos en la función base de R *gsub* y en expresiones regulares^[Expresiones regulares (https://www.geeksforgeeks.org/write-regular-expressions/)] que utilizaremos para limpiar variables tipo caracter. Para la segunda, en la que limpiaremos un corpus (una lista de clase SimpleCorpus), realizaremos transformaciones mediante las funciones provistas en el paquete *tm.*
+
+
+Función *clean.txt(x)*:
+
+```{r 'clean.txt'}
+clean.txt <- function(x){
+  
+  # Eliminamos lineas vacias
+  x <- x[x != ""]
+
+  # Eliminamos caracteres especiales e.g secuencia escape tabulador horizontal
+  x <- gsub("\a|\t|\r|\n", "", x)   # Eliminamos tabulador horizontal, retorno de carro, nueva linea
+  x <- gsub("/"," ",x)              # Elimina '/' entre palabras e.g proposal/initiative
+  x <- gsub("(<[^>]*>)", "", x)     # Quitamos el código html de los links
+  x <- gsub("\\W"," ",x)            # Quitamos caracteres de subatitucion de casillas de verificacion
+  x <- gsub("\\bX\\b"," ",x)        # Ticks de verificacion (formulario)
+  return(x)
+}
+```
+
+```{r 'clean pdf'}
+pdf_texto <- clean.txt(pdf_texto)
+```
+Ahora podemos buscar dentro del texto usando la función *grep*, por ejemplo, la palabra **covid**, ignorando mayúsculas, minúsculas, etcétera, que es una palabra que esperábamos apareciera en numerosas ocasiones.
+
+```{r}
+index_covid <- grep("\\Wcovid\\W", pdf_texto, ignore.case = TRUE, perl = TRUE)
+```
+
+Hemos creado un objeto, index_covid, que apunta a las páginas donde aparece la palabra covid, con un total de `r length(index_covid)` páginas.
+
+Páginas donde aparece: `r index_covid`.
+
+
+
+### Corpus
+
+Examinando la importancia de las palabras contenidas en el documento, trataremos de identificar el asunto o tema tratado. 
+
+Una medida de la importancia de una palabra puede ser su término de frecuencia, es decir, la frecuencia con la que aparece en el documento. Sin embargo, existen palabras que, aún teniendo una frecuencia alta, no son relevantes para nuestro propósito como puedan ser artículos, preposiciones, etcétera. Siguiendo este criterio se eliminarán en primer lugar las palabras que no consideremos significativas.
+
+En cualquier caso, es siempre interesante crear un corpus de *tm* que nos permita realizar operaciones de minería de texto; usamos la función *Corpus*:
+
+```{r}
+corpus <- Corpus(VectorSource(pdf_texto), readerControl = list(language = "en"))
+corpus
+```
+
+Una vez creado el corpus, realizamos transformaciones en este mediante la función *tm_map* que aplica o mapea una función a todos los elementos del corpus.
+
+Creamos la función *corpus.clean* para limpiar el corpus en la que:
+
+1. Quitaremos los espacios en blanco.
+2. Pasaremos a minúsculas.
+3. Eliminaremos los signos de puntuación.
+4. Suprimiremos los números.
+5. Eliminaremos las "stopwords"
+6. Convertiremos a texto plano.
+
+Previamente añadimos a la lista de palabras a eliminar en el *stopwords*, términos que hemos observado aparecen con frecuencia, pero que no aportan significado al estudio y no se encuentran en el conjunto de stopwords en inglés.
+
+Actualmente en el diccionario inglés:
+ 
+* `r stopwords(kind = 'en')`
+
+Añadimos los términos:
+
+* shall , per, will
+
+```{r 'custom stopwords'}
+
+# Se añaden las siguientes palabras:
+ 
+my_stopwords <- c('shall','per','will')
+
+stopwords <- c(my_stopwords, stopwords(kind = 'en'))
+```
+
+Creamos la función *corpus.clean(x)*
+
+```{r 'courpus.clean', warning=FALSE}
+corpus.clean <- function(x){
+  # Quitamos los espacios en blanco
+  cp <- tm_map(x, stripWhitespace)
+
+  # Pasamos a minúsculas.
+  cp <- tm_map(cp,tolower)
+
+  # Eliminamos los signos de puntuación
+  cp <- tm_map(cp, removePunctuation)
+
+  # Suprimimos los números
+  cp <- tm_map(cp, removeNumbers)
+
+  # Quitamos los stopwords en inglés (lang)
+  cp <- tm_map(cp,removeWords, stopwords) 
+  return(cp)
+}
+```
+
+Limpiamos el corpus
+```{r warning=FALSE}
+corpus <- corpus.clean(corpus)
+```
+
+Comprobamos las modificaciones en la página 2 visualizada anteriormente.
+
+```{r}
+inspect(corpus[2])
+```
+
+  
+***
+
+### Matriz DTM
+A través del corpus, limpio de términos en los que no estamos interesados, creamos una matriz con documentos por fila, en este caso 28 páginas, y términos por columnas (*D*ocument*T*erm*M*atrix). Este documento, nos facilitará el cómputo y la representación gráfica de la frecuencia de las palabras "importantes" mediante una nube de palabras.
+
+```{r}
+pdf_dtm <- DocumentTermMatrix(corpus)
+pdf_dtm
+```
+
+Tenemos por lo tanto una dimensión de:
+
+```{r include=FALSE}
+pdf_dtm$nrow
+pdf_dtm$ncol
+```
+
+
+* `r pdf_dtm$nrow` documentos que aparecen como *Docs* y como filas *nrow* en el DTM que denominamos pdf_dtm.
+* `r pdf_dtm$ncol` términos que aparecen como *Terms* y como columnas *ncol* en el DTM.
+
+Es decir, tras la pequeña limpieza de los términos en el corpus obtenemos una matriz dispersa de `r pdf_dtm$nrow` documentos y `r pdf_dtm$ncol` términos distintos. 
+
+## Nube de Palabras
+
+Como el documento no es muy grande, generamos una lista de términos con una frecuencia absoluta mínima de 15. En esta ocasión vamos a usar la función *findFreqTerms* del paquete *tm*
+
+```{r 'terminos frecuentes'}
+ft <- findFreqTerms(pdf_dtm, 15)
+```
+
+  
+***
+Representamos gráficamente mediante un wordcloud o *nube de palabras*. De esta manera podemos de un simple vistazo ver los términos principales del documento.
+
+```{r, warning=FALSE, fig.align="center"}
+wordcloud(corpus, min.freq = 15, random.order = FALSE, colors = brewer.pal(12, "Paired"))
+```
+De manera ilustrativa vemos el peso de cada palabra según su tamaño en la nube. Podemos concluir que el documento en general hace hincapié en el apoyo financiero de la Unión europea para recuperarse del impacto de la pandemia covid.
+
+
+Una vez tenemos el DTM, en lugar de crear un TDM para representar un diagrama de frecuencias, transformamos el DTM en forma matricial y para facilitarnos la representación gráfica a dataframe.
+
+```{r}
+
+# Lo convertimos en matriz
+t<- sort(colSums(as.matrix(pdf_dtm)), decreasing = TRUE)
+
+# Y creamos el objeto como dataframe
+dtm_matriz  <- data.frame(word=names(t), freq=t)
+
+head(dtm_matriz, 20)
+
+```
+
+
+Gráficamente
+
+```{r , 'grafico frecuencia', fig.align="center"}
+ggplot(dtm_matriz[1:20,], aes(x=reorder(dtm_matriz[1:20, ]$word,dtm_matriz[1:20, ]$freq), y=dtm_matriz[1:20, ]$freq)) +
+  geom_bar(stat="identity", aes(fill=dtm_matriz[1:20, ]$freq), show.legend=FALSE) + 
+  geom_label(aes(label=paste0(round(dtm_matriz[1:20, ]$freq*1, 2), ""))) +
+  scale_fill_gradient(low="paleturquoise", high="paleturquoise4") +
+  labs(x="Término", y="Frecuencia absoluta", 
+       title="Palabras mas frecuentes") + 
+  coord_flip() +
+  theme_bw()
+```
+
+
+  
+***
+## Modelado de tópicos
+
+Tal y como apuntamos en la introducción del Análisis de documentos, para la modelación del tópico utilizaremos la función *stm*. Dado que ya tenemos un DTM no necesitaremos crear un dfm. Sin embargo, si que será necesaria una transformación mediante la función *readCorpus*.
+
+Como parámetro de la función *stm*, que realiza el modelado, está el número de bloques o cluster *K*  que queremos, en nuestro caso 3. Es decir, queremos que divida el texto o documento completo en tres tópicos con las palabras asociadas a cada uno de ellos o más próximas a ellos según la métrica utilizada por el algoritmo (kmeans). Utilizamos una inicialización determinista usando el algoritmo "spectral" que presenta un buen rendimiento con menos de 10.000 elementos.
+
+```{r message=FALSE, warning=FALSE}
+out <- readCorpus(pdf_dtm, type="slam")
+documents <- out$documents
+vocab <- out$vocab
+out <- prepDocuments(documents, vocab, meta=NULL)
+topic_model <- stm(documents, vocab, K = 3, verbose = FALSE, init.type = "Spectral")
+```
+
+```{r}
+summary(topic_model)
+```
+
+De una forma similar, mediante una exploración de la agrupación de las palabras en los distintos tópicos, independientemente de la medida en la que nos fijemos, la máxima probabilidad, frecuencia y exclusividad o las medidas de otros paquetes de text-mining populares como Lift y Score, vemos que en general:
+
+* El *Topic 1* tiene que ver con pago, personal, recursos humanos.
+* El *Topic 2* nos habla de la propuesta financiera dentro del marco multianual
+* El *Topic 3* trata de la recuperación económica de la Unión Europea causada por la crisis de la pandemia covid  
+
+Podemos visualizar individualmente cada tópico. Por ejemplo, para el tópico 2 tenemos:
+
+```{r warning=FALSE}
+cloud(topic_model, topic = 2, type = c("model", "documents"), documents,
+thresh = 0.9, max.words = 100)
+```
+
+  
+***
+Vemos de forma gráfica los tres temas por frecuencia de palabras
+
+```{r message=FALSE, warning=FALSE}
+# Creamos un td_beta como tidy tibble de topic_model
+library(tidyr)
+library(tidytext)
+td_beta <- tidy(topic_model)
+
+```
+
+```{r fig.align="center", message=FALSE, warning=FALSE}
+library(dplyr)
+td_beta %>%
+  
+    # Agrupamos por topic
+    group_by(topic) %>%
+  
+    # Nos quedamos con los top n (10) sobre el valor de beta  
+    top_n(10, beta) %>%
+  
+    # Desagrupamos
+    ungroup() %>%
+  
+    # Cambiamos y reordenamos. Tres columnas: topic, term, beta
+    mutate(topic = paste0("Topic ", topic),
+           term = reorder_within(term, beta, topic)) %>%
+  
+    # Creamos un gráfico  
+    ggplot(aes(term, beta, fill = as.factor(topic))) +
+    geom_col(alpha = 0.8, show.legend = FALSE) +
+    facet_wrap(~ topic, scales = "free_y") +
+    coord_flip() +
+    scale_x_reordered() +
+    labs(x        = NULL, 
+         y        = expression(beta),
+         title    = "Palabras con mayores probabilidades para cada tema",
+         subtitle = "Diferentes palabras se asocian a diferentes temas")
+```
+  
+***
+## ETL **CONCLUSIONES**
+### **E**TL - Extract
+Cargamos en memoria el archivo pdf de las conclusiones adoptadas por el Consejo de la Unión Europea dentro del marco financiero multianual para apoyar la recuperación después de la pandemia del Covid-19 tras la reunión mantenida hasta la madrugada del 21 de julio de 2020.^[European Council euco final conclusions: https://www.consilium.europa.eu//media/45109/210720-euco-final-conclusions-en.pdf]
+
+Se lee directamente el pdf original, almacenado en el directorio data, con la función *readPDF* y se continua con los procedimientos seguidos en el [ETL de la propuesta](#etl_propuesta).
+
+
+```{r 'leer acuerdo'}
+my_uri <- "./data/210720-euco-final-conclusions-en.pdf"
+# Leemos
+pdf_doc <- readPDF(control=list(text='-enc "UTF-8"'))(elem = list(uri = my_uri), language="en")
+```
+
+```{r 'metadatos conclusiones'}
+pdf_doc$meta
+```
+
+En este caso se trata de un pdf creado con PDFMaker por PIGEON Supattra en inglés. Extraemos el contenido.
+  
+```{r}
+pdf_texto <- content(pdf_doc)
+```
+
+
+***
+### E**T**L - Transform
+
+Limpiamos el texto con la función creada *clean.txt*
+
+```{r}
+pdf_texto <- clean.txt(pdf_texto)
+```
+
+Creamos un corpus, lo limpiamos y visualizamos el número de documentos que en nuestro caso serán páginas.
+
+```{r warning=FALSE}
+(corpus <- corpus.clean(Corpus(VectorSource(pdf_texto), readerControl = list(language = "en"))))
+```
+
+Creamos un DTM
+ 
+```{r}
+pdf_dtm <- DocumentTermMatrix(corpus)
+```
+
+***
+## Nube de Palabras
+Encontramos las palabras con una frecuencia absoluta mínima de 15.
+
+```{r}
+(ft <- findFreqTerms(pdf_dtm, 15))
+```
+
+```{r, warning=FALSE, fig.align="center"}
+wordcloud(corpus, min.freq = 15, random.order = FALSE, colors = brewer.pal(12, "Paired"))
+```
+
+Observamos en la nube de palabras la mayor importancia de términos como **Euro, millones, miembros, estados, europeo, religiones, euco, recursos financieros, apoyo, fondos**
+
+Construimos una tabla de frecuencias y la representamos gráficamente:
+
+```{r}
+
+# Lo convertimos en matriz
+t<- sort(colSums(as.matrix(pdf_dtm)), decreasing = TRUE)
+
+# Y creamos el objeto como dataframe
+tdm_matriz  <- data.frame(word=names(t), freq=t)
+
+head(tdm_matriz, 20)
+
+```
+
+
+
+```{r , 'grafico frecuencia2', fig.align="center"}
+ggplot(tdm_matriz[1:20,], aes(x=reorder(tdm_matriz[1:20, ]$word,tdm_matriz[1:20, ]$freq), y=tdm_matriz[1:20, ]$freq)) +
+  geom_bar(stat="identity", aes(fill=tdm_matriz[1:20, ]$freq), show.legend=FALSE) + 
+  geom_label(aes(label=paste0(round(tdm_matriz[1:20, ]$freq*1, 2), ""))) +
+  scale_fill_gradient(low="paleturquoise", high="paleturquoise4") +
+  labs(x="Término", y="Frecuencia absoluta", 
+       title="Palabras mas frecuentes") + 
+  coord_flip() +
+  theme_bw()
+```
+A parte de los términos ya mencionados en la nube de palabras, notamos otros términos nuevos que aparecen con mayor o menor fuerza como **gdp** (Gross Domestic Product), **pps** (Purchasing Power Standard,) **mff** (Multiannual Financial Framework), **eafrd** (European Agricultural Fund For Rural Development) indicándonos que se trata de algo más que un documento de propuesta de ayuda para superar la crisis del covid-19.
+
+Se trata de recurso EUCO dentro del marco financiero multianual y por lo tanto engloba temas medioambientales (climate), agropecuarios, etcétera.
+
+  
+***
+## Modelado de tópicos
+
+```{r message=FALSE, warning=FALSE}
+out <- readCorpus(pdf_dtm, type="slam")
+documents <- out$documents
+vocab <- out$vocab
+out <- prepDocuments(documents, vocab, meta=NULL)
+topic_model <- stm(documents, vocab, K = 3, verbose = FALSE, init.type = "Spectral")
+```
+
+```{r}
+summary(topic_model)
+```
+Mediante la exploración de las palabras en los distintos tópicos, vemos que en general:
+
+* El *Topic 1* tiene que ver con el presupuesto multianual de la Unión Europea, los objetivos, la planificación. Las circunstancias excepcionales urgentes. (european, union, mmf, budgetary, milestones, targets).
+* El *Topic 2* nos habla de los fondos de apoyo, cohesión, inversión y agricultura.
+* El *Topic 3* trata de sociales como el desempleo, el poder adquisitivo, crecimiento económico, las religiones. (unemployed, pps, gdp, religion)
+
+
+De forma gráfica
+
+```{r message=FALSE, warning=FALSE}
+# Creamos un td_beta como tidy tibble de topic_model
+library(tidyr)
+library(tidytext)
+td_beta <- tidy(topic_model)
+
+```
+
+```{r fig.align="center", message=FALSE, warning=FALSE}
+library(dplyr)
+td_beta %>%
+  
+    # Agrupamos por topic
+    group_by(topic) %>%
+  
+    # Nos quedamos con los top n (10) sobre el valor de beta  
+    top_n(10, beta) %>%
+  
+    # Desagrupamos
+    ungroup() %>%
+  
+    # Cambiamos y reordenamos. Tres columnas: topic, term, beta
+    mutate(topic = paste0("Topic ", topic),
+           term = reorder_within(term, beta, topic)) %>%
+  
+    # Creamos un gráfico  
+    ggplot(aes(term, beta, fill = as.factor(topic))) +
+    geom_col(alpha = 0.8, show.legend = FALSE) +
+    facet_wrap(~ topic, scales = "free_y") +
+    coord_flip() +
+    scale_x_reordered() +
+    labs(x        = NULL, 
+         y        = expression(beta),
+         title    = "Palabras con mayores probabilidades para cada tema",
+         subtitle = "Diferentes palabras se asocian a diferentes temas")
+```
+
+  
+***
+# Análisis de Tweets
+Tal y como se mencionó en la introducción, se pretende examinar las primeras respuestas en las redes sociales a través de Twitter. Por una parte, para ver si los temas fundamentales recogidos en los documentos son de alguna forma importantes para la población, desde el punto de vista que se habla y discute de ello, y por otra parte, si la opinión sobre las conclusiones son en general positivas o negativas.
+
+## ETL Tweets
+
+### **E**TL - Extract
+
+Accedemos a los datos de Twitter a través de su API. Nos autenticamos a través de su servicio web.
+
+```{r}
+#source('./data/Auth_Twitter_JE.R')
+
+# Acedemos a Twitter a través de las claves de la App generadas por Tweeter
+# creamos token de acceso
+
+
+# token <- create_token(
+#   app = "BigEUdata",
+#   consumer_key = api_key,
+#   consumer_secret = api_secret_key,
+#   access_token = access_token,
+#   access_secret = access_token_secret)
+
+
+# autenticamos via web browser
+
+#  token <- get_token()
+
+```
+
+  
+***
+Mediante la función *search_tweets*^[Tweeter API funcion search: (https://developer.twitter.com/en/docs/tweets/search/api-reference/get-search-tweets)] de la librería *rtweets* lanzamos una petición de 10000 tweets, sin incluir retweets, en inglés con tweets que incluyan como mínimo alguno de los siguientes términos:
+
+* NextGenerationEU
+* EUCO
+* RecoveryFund
+
+```{r}
+#EUCO_tweets <- search_tweets("NextGenerationEU OR EUCO OR RecoveryFund", n = 10000, lang="en", include_rts = FALSE, verbose = TRUE)
+```
+
+Los guardamos por si tuviéramos que replicar los resultados.
+```{r}
+#save(EUCO_tweets, file = './data/NextGenerationEU_EUCO_RF_nrtw_en_2020-07-27.RData')
+load( file = './data/NextGenerationEU_EUCO_RF_nrtw_en_2020-07-27.RData')
+```
+
+
+Vemos el tamaño del objeto para confirmar si hemos obtenido 10.000 tweets o menos.
+
+```{r}
+dim(EUCO_tweets)
+```
+
+
+
+Sacamos el texto  de los tweets y visualizamos los 5 primeros tweets para tener una idea de procesamiento necesario.
+
+```{r}
+EUCO_text <- EUCO_tweets$text
+head(EUCO_text, 5)
+```
+***
+Definimos la función *tweets.clean* para el limpiado de los tweets.
+
+```{r 'tweets.clean'}
+tweets.clean <- function(x){
+
+  x <- gsub("(RT|via)((?:\\b\\W*@\\w+)+)", "", x) # Elimina retweets
+# x <- gsub("@\\w+", "", x)                   #Elimina personas #deshabilitada para ver si alguien ha tweeteado mucho
+  x <- gsub("[[:punct:]]", "", x)             #Elimina signos de puntuacion
+  x <- gsub("\\bhttp[a-zA-Z0-9]*\\b", "", x)  #Elimina enlaces http
+  x <- gsub("amp ", "", x)                    #Elimina la palabra amp
+  x <- gsub("[^a-zA-Z0-9 ]", "", x)           #Elimina caractes no alfanumericos
+  x <- gsub("\\btco[a-zA-Z0-9]*\\b", "", x)   #Elimina tco's
+  x <- x[!is.na(x)]                           #Elimina NA's
+  x <- iconv(x, 'UTF-8', 'ASCII')             #Elimina emoiconos
+  x <- gsub("[ \t]{2,}", "", x)               #Elimina tabulador horizontal
+  x <- gsub("^\\s+|\\s+$", "", x)             #Elimina espacios genericos
+  
+  return(x)
+}
+```
+
+Limpiamos los tweets
+
+```{r}
+EUCO_text <- tweets.clean(EUCO_text)
+```
+
+Pasamos a minúsculas y visualizamos los 5 primeros tweets transformados
+
+```{r}
+EUCO_text <- tolower(EUCO_text)
+
+head(EUCO_text, 5)
+```
+
+### Corpus Tweets
+
+Creamos un corpus
+
+```{r message=FALSE, warning=FALSE}
+EUCO_corpus <- Corpus(VectorSource(EUCO_text))
+inspect(EUCO_corpus[1:5])
+```
+
+Limpiamos el corpus con la función creada inicialmente 
+
+```{r warning=FALSE}
+EUCO_corpus <- corpus.clean(EUCO_corpus)
+```
+  
+***
+### DTM Tweets
+
+Creamos un dtm (Document-Term Matrix)
+
+```{r}
+EUCO_dtm <- DocumentTermMatrix(EUCO_corpus, control = list(minWordLength = 1, stopwords = TRUE))
+inspect(EUCO_dtm)
+```
+
+
+### Palabras frecuentes
+Los términos más frecuentes
+
+```{r}
+head(findFreqTerms(EUCO_dtm, lowfreq=100), 20)
+```
+
+Veamos qué palabras están más asociadas a la palabra 'recuperación' (recovery)
+
+```{r}
+findAssocs(EUCO_dtm, 'recovery', 0.15)
+```
+
+
+## Nube de palabras
+
+```{r, fig.align="center"}
+wordcloud(EUCO_corpus, min.freq = 200, random.order = FALSE, colors = brewer.pal(12, "Paired"))
+```
+
+  
+***
+## Nube de Polaridad
+
+En esta ocasión representamos una nube de palabras con polaridad. Es decir, divididas en dos polos uno con carácter negativo y el otro positivo.
+
+```{r}
+# Transform the text to a tidy data structure with one token per row
+EUCO_TT <- as.data.frame(EUCO_corpus$content)
+tokens <- EUCO_TT %>%  
+  mutate(dialogue=EUCO_corpus$content) %>%
+  unnest_tokens(word, dialogue)
+```
+
+```{r}
+# Positive and negative words
+#install.packages("reshape2")
+
+tokens %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(word, sentiment, sort=TRUE) %>%
+  acast(word ~ sentiment, value.var="n", fill=0) %>%
+  comparison.cloud(colors=c("#F8766D", "#00BFC4"), max.words=100)
+```
+
+***
+## Comparativa tweets españoles
+Comparamos con la nube de palabras y de polaridad de twitteros en español.
+
+```{r}
+#En vez de sacar los datos de Twitter, podemos cargar el fichero
+load("./data/NextGenerationEU_EUCO_RF_nrtw_es_2020-07-25.RData")
+EUCO_text <- EUCO_tweets$text
+```
+
+Definimos la función *spain.rm* para eliminar los acentos  y la 'ñ' en tweets en español.
+
+```{r}
+spain.rm <- function(x){
+  # Quito todos los acento para tener menos dificultades con la nube de palabras
+  # Cambio la ñ porque de problemas en la nube
+  x <- gsub("á", "a", x)
+  x <- gsub("é", "e", x)
+  x <- gsub("í", "i", x)
+  x <- gsub("ó", "o", x)
+  x <- gsub("ú", "u", x)
+  x <- gsub("ñ", "n", x)
+}
+```
+
+Eliminamos caracteres españoles de los tweets, limpiamos los tweets y creamos un corpus para representar la nube de palabras y posterior polaridad siguiendo los mismos pasos que para los tweets en inglés.
+
+```{r fig.align="center", warning=FALSE}
+#Limpiamos tweets
+EUCO_text <- tolower(tweets.clean(spain.rm(EUCO_text)))
+
+#Creamos corpus y lo limpiamos
+EUCO_corpus <- Corpus(VectorSource(EUCO_text))
+stopwords <- spain.rm(stopwords::stopwords("es"))
+EUCO_corpus <- corpus.clean(EUCO_corpus)
+
+# wordcloud
+wordcloud(EUCO_corpus, min.freq = 100, random.order = FALSE, colors = brewer.pal(12, "Paired"))
+```
+En los tweets en español, destacan términos como *euco, acuerdo, europa, espana, sanchez, millones, recuperacion, historico*. Aparentemente, se centra más en temas monetarios y de ayuda, aunque menciona reforma, covid y gracias. 
+
+No menciona o al menos con suficiente frecuencia, el mff (multiannual financial framework - presupuesto multianual) o palabras como green, climate, world o salud que si representan cierta frecuencia en la versión inglesa.
+
+***
+```{r message=FALSE, warning=FALSE}
+
+# Transform the text to a tidy data structure with one token per row
+EUCO_TT <- as.data.frame(EUCO_corpus$content)
+tokens <- EUCO_TT %>%  
+  mutate(dialogue=EUCO_corpus$content) %>%
+  unnest_tokens(word, dialogue)
+
+
+# Positive and negative words
+
+tokens %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(word, sentiment, sort=TRUE) %>%
+  acast(word ~ sentiment, value.var="n", fill=0) %>%
+  comparison.cloud(colors=c("#F8766D", "#00BFC4"), max.words=100)
+```
+
+  
+***
+La polaridad está también muy igualada, aunque parece ser un poco más negativa comparada con los twitteros de habla inglesa.
+
+
+*Como conclusión, me gustaría mencionar que los twitteros, en especial los que se expresan en inglés, hablan en general de los términos englobados los documentos. Es decir, tienen conocimiento según este análisis del contenido tratado en los documentos publicados por la Comisión Europea y además ven aspectos más positivos que negativos.*
+
+
+***
+
+Terminamos con la información de la sesión
+
+```{r}
+sessionInfo()  
+```
+
+
+***
+# Referencias
+
+* The game is afoot! Topic modeling of Sherlock Holmes stories https://juliasilge.com/blog/sherlock-holmes-stm/
+* Text Mining with R: https://www.tidytextmining.com/
+* R documentation https://www.rdocumentation.org/packages/stm/versions/1.3.5/topics/stm
+* stackoverflow: https://stackoverflow.com/
+* Santiago Mota: Material de Máster en Big data & business analytics (Módulo Text Mining)
+  
+
+
+
